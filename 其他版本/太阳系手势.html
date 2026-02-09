@@ -1,0 +1,539 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>粒子太阳系 - 银河旗舰版</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #canvas-container {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+            z-index: 1;
+            /* 背景微调：中心深蓝黑向边缘纯黑过渡 */
+            background: radial-gradient(circle at center, #050510 0%, #000000 100%); 
+        }
+
+        /* UI 覆盖层 */
+        #ui-layer {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            z-index: 10;
+            pointer-events: auto;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+            width: 260px;
+        }
+
+        .input_video {
+            width: 160px;
+            height: 120px;
+            border-radius: 10px;
+            border: 2px solid rgba(100, 180, 255, 0.5);
+            transform: scaleX(-1); /* 镜像 */
+            background: #111;
+            opacity: 0.8;
+            object-fit: cover;
+        }
+
+        .status-panel {
+            color: rgba(255, 255, 255, 0.9);
+            background: rgba(0, 0, 0, 0.6);
+            padding: 15px;
+            border-radius: 10px;
+            border-left: 4px solid #4488ff;
+            backdrop-filter: blur(5px);
+            box-shadow: 0 0 15px rgba(0,0,0,0.5);
+        }
+
+        h1 {
+            margin: 0 0 5px 0;
+            font-size: 1.2rem;
+            color: #4488ff;
+            text-shadow: 0 0 10px rgba(68, 136, 255, 0.5);
+        }
+
+        p {
+            margin: 5px 0;
+            font-size: 0.9rem;
+            line-height: 1.4;
+        }
+
+        .highlight {
+            color: #fff;
+            font-weight: bold;
+        }
+        
+        #loading {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #4488ff;
+            font-size: 24px;
+            z-index: 20;
+            text-shadow: 0 0 20px #0055ff;
+            text-align: center;
+        }
+    </style>
+
+    <!-- MediaPipe -->
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/control_utils/control_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js" crossorigin="anonymous"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@mediapipe/hands/hands.js" crossorigin="anonymous"></script>
+
+    <!-- Three.js -->
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+</head>
+<body>
+
+    <div id="loading">正在生成银河结构...<br><span style="font-size:14px; color:#aaa;">请允许摄像头权限</span></div>
+
+    <div id="ui-layer">
+        <video class="input_video" playsinline muted autoplay></video>
+        <div class="status-panel">
+            <h1>星际导航系统 (Galaxy+)</h1>
+            <p>👋 <b>旋转手掌:</b> 环绕视角</p>
+            <p>✊ <b>握拳 (拉远):</b> 太阳系全景</p>
+            <p>🖐 <b>张开 (靠近):</b> 观测太阳表面</p>
+            <p>当前: <span id="target-status" class="highlight">太阳系中心</span></p>
+        </div>
+    </div>
+
+    <div id="canvas-container"></div>
+
+    <script type="module">
+        import * as THREE from 'three';
+
+        // ==========================================
+        // 1. 配置 & 状态
+        // ==========================================
+        const CONFIG = {
+            maxDist: 360, 
+            minDist: 35, 
+        };
+
+        const PLANETS_DATA = [
+            { name: 'Mercury', color: 0xaaaaaa, radius: 2, distance: 40, speed: 0.8, count: 150, type: 'crystal' }, 
+            { name: 'Venus',   color: 0xeeccee, radius: 3.5, distance: 60, speed: 0.6, count: 250, type: 'crystal' }, 
+            { name: 'Earth',   color: 0x22aaff, radius: 4, distance: 90, speed: 0.5, count: 400, hasMoon: true, type: 'crystal' }, 
+            { name: 'Mars',    color: 0xff5533, radius: 2.5, distance: 120, speed: 0.4, count: 200, type: 'crystal' }, 
+            { name: 'Jupiter', color: 0xdca866, radius: 12, distance: 170, speed: 0.2, count: 2000, type: 'gas' }, 
+            { name: 'Saturn',  color: 0xeedd88, radius: 10, distance: 230, speed: 0.15, count: 1800, hasRing: true, type: 'gas' }, 
+            { name: 'Uranus',  color: 0x66ccff, radius: 7, distance: 290, speed: 0.1, count: 1000, type: 'gas' }, 
+            { name: 'Neptune', color: 0x3333ff, radius: 6.5, distance: 340, speed: 0.08, count: 1000, type: 'gas' } 
+        ];
+
+        const STATE = {
+            zoomLevel: 0.8, 
+            targetZoomLevel: 0.8,
+            cameraAngle: 0,
+            handRotationOffset: 0,
+            isHandDetected: false,
+            gesture: 'NONE'
+        };
+
+        const statusEl = document.getElementById('target-status');
+        const loadingEl = document.getElementById('loading');
+        const videoElement = document.querySelector('.input_video');
+        
+        const celestialBodies = {}; 
+        let galaxyCore, galaxyMist; // 存储银河的两层引用
+
+        // ==========================================
+        // 2. 场景初始化
+        // ==========================================
+        const scene = new THREE.Scene();
+        // 降低雾的浓度，让远处的银河更清晰
+        scene.fog = new THREE.FogExp2(0x020205, 0.0006); 
+
+        const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 4000);
+        
+        const renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        document.getElementById('canvas-container').appendChild(renderer.domElement);
+
+        // --- 纹理系统 ---
+        
+        function createSoftTexture() {
+            const canvas = document.createElement('canvas');
+            canvas.width = 64; 
+            canvas.height = 64;
+            const ctx = canvas.getContext('2d');
+            const g = ctx.createRadialGradient(32, 32, 0, 32, 32, 32);
+            g.addColorStop(0, 'rgba(255,255,255,1)');    
+            g.addColorStop(0.2, 'rgba(255,255,255,0.8)'); 
+            g.addColorStop(0.5, 'rgba(255,255,255,0.2)'); 
+            g.addColorStop(1, 'rgba(0,0,0,0)');           
+            ctx.fillStyle = g;
+            ctx.fillRect(0,0,64,64);
+            return new THREE.CanvasTexture(canvas);
+        }
+
+        const softMap = createSoftTexture();
+
+        // ==========================================
+        // 3. 银河生成工厂 (核心优化)
+        // ==========================================
+        
+        // 1. 银河骨架：密集、明亮、带色
+        function createGalaxyCore() {
+            const geometry = new THREE.BufferGeometry();
+            const count = 10000; 
+            const positions = [];
+            const sizes = [];
+            const colors = [];
+            
+            // 基础色：冷蓝紫
+            const baseColor = new THREE.Color(0xaaccff);
+
+            for(let i = 0; i < count; i++) {
+                // 角度
+                const angle = Math.random() * Math.PI * 2;
+                // 半径：集中在中间区域 (300 - 1000)
+                const r = 300 + Math.random() * 700; 
+                
+                // 螺旋/聚集扰动
+                const spread = 120;
+                const x = r * Math.cos(angle) + (Math.random() - 0.5) * spread;
+                const z = r * Math.sin(angle) + (Math.random() - 0.5) * spread;
+                // 扁平
+                const y = (Math.random() - 0.5) * 80 * (1 - r/1200);
+
+                positions.push(x, y, z);
+                
+                // 尺寸：稍小但密集
+                sizes.push(1.0 + Math.random() * 2.0);
+
+                // 颜色随机扰动：有的偏蓝，有的偏白
+                const colorVar = baseColor.clone();
+                colorVar.offsetHSL(0, 0, (Math.random()-0.5)*0.2); // 亮度变化
+                colors.push(colorVar.r, colorVar.g, colorVar.b);
+            }
+            
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+            geometry.setAttribute('color', new THREE.Float32BufferAttribute(colors, 3));
+
+            const material = new THREE.PointsMaterial({
+                vertexColors: true,
+                size: 1.0, 
+                map: softMap, 
+                transparent: true,
+                opacity: 0.5, // 提高不透明度
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                sizeAttenuation: true
+            });
+
+            return new THREE.Points(geometry, material);
+        }
+
+        // 2. 银河星尘/光晕：广阔、柔和、大颗粒
+        function createGalaxyMist() {
+            const geometry = new THREE.BufferGeometry();
+            const count = 8000; 
+            const positions = [];
+            const sizes = [];
+
+            for(let i = 0; i < count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                // 半径更广 (400 - 1500)
+                const r = 400 + Math.random() * 1100; 
+                
+                const spread = 200;
+                const x = r * Math.cos(angle) + (Math.random() - 0.5) * spread;
+                const z = r * Math.sin(angle) + (Math.random() - 0.5) * spread;
+                // 厚度更厚
+                const y = (Math.random() - 0.5) * 250;
+
+                positions.push(x, y, z);
+                // 颗粒很大，形成云雾感
+                sizes.push(4.0 + Math.random() * 5.0);
+            }
+            
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+
+            const material = new THREE.PointsMaterial({
+                color: 0x8899aa, // 灰蓝白
+                size: 1.0, 
+                map: softMap, 
+                transparent: true,
+                opacity: 0.15, // 低透明度，只做背景烘托
+                blending: THREE.AdditiveBlending,
+                depthWrite: false,
+                sizeAttenuation: true
+            });
+
+            return new THREE.Points(geometry, material);
+        }
+
+        // ==========================================
+        // 4. 行星生成工厂 (保持原样)
+        // ==========================================
+        function createCelestialBody(radius, color, count, type = 'crystal') {
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            const sizes = [];
+
+            let particleBaseSize = 1.0;
+            let opacity = 1.0;  
+
+            if (type === 'sun') {
+                particleBaseSize = 2.0; opacity = 0.8;
+            } else if (type === 'gas') {
+                particleBaseSize = 1.5; opacity = 0.4;
+            } else if (type === 'crystal') {
+                particleBaseSize = 1.8; opacity = 0.5; 
+            }
+
+            for (let i = 0; i < count; i++) {
+                const phi = Math.acos(-1 + (2 * i) / count);
+                const theta = Math.sqrt(count * Math.PI) * phi;
+                let r = radius;
+                if (type === 'sun') r += (Math.random() - 0.5) * (radius * 0.15); 
+                else if (type === 'gas') r += (Math.random() - 0.5) * (radius * 0.3);  
+                else r += (Math.random() - 0.5) * 0.8; 
+                const x = r * Math.cos(theta) * Math.sin(phi);
+                const y = r * Math.sin(theta) * Math.sin(phi);
+                const z = r * Math.cos(phi);
+                positions.push(x, y, z);
+                sizes.push(particleBaseSize * (0.6 + Math.random() * 0.8));
+            }
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            geometry.setAttribute('size', new THREE.Float32BufferAttribute(sizes, 1));
+            const material = new THREE.PointsMaterial({
+                color: color, size: 1.0, map: softMap, transparent: true, opacity: opacity,
+                blending: THREE.AdditiveBlending, depthWrite: false, sizeAttenuation: true
+            });
+            return new THREE.Points(geometry, material);
+        }
+
+        function createRing(innerR, outerR, color, count) {
+            const geometry = new THREE.BufferGeometry();
+            const positions = [];
+            for(let i=0; i<count; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const r = innerR + Math.random() * (outerR - innerR);
+                const x = r * Math.cos(angle);
+                const z = r * Math.sin(angle);
+                const y = (Math.random() - 0.5) * 0.3; 
+                positions.push(x, y, z);
+            }
+            geometry.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3));
+            const material = new THREE.PointsMaterial({
+                color: color, size: 0.8, map: softMap, transparent: true, opacity: 0.3, 
+                blending: THREE.AdditiveBlending, depthWrite: false
+            });
+            return new THREE.Points(geometry, material);
+        }
+
+        function createOrbitLine(radius) {
+            const curve = new THREE.EllipseCurve(0, 0, radius, radius, 0, 2 * Math.PI, false, 0);
+            const points = curve.getPoints(128);
+            const geometry = new THREE.BufferGeometry().setFromPoints(points);
+            geometry.rotateX(-Math.PI / 2);
+            return new THREE.Line(geometry, new THREE.LineBasicMaterial({ color: 0x333333, transparent: true, opacity: 0.3 }));
+        }
+
+        // --- 组装 ---
+        
+        // 1. 太阳
+        const sun = createCelestialBody(22, 0xffaa00, 3000, 'sun'); 
+        scene.add(sun);
+
+        // 2. 行星
+        PLANETS_DATA.forEach(data => {
+            const orbitGroup = new THREE.Group();
+            scene.add(orbitGroup);
+            scene.add(createOrbitLine(data.distance));
+            const planetSystem = new THREE.Group();
+            planetSystem.position.x = data.distance;
+            orbitGroup.add(planetSystem);
+            planetSystem.add(createCelestialBody(data.radius, data.color, data.count, data.type));
+            if (data.hasRing) {
+                const ring = createRing(data.radius * 1.4, data.radius * 2.2, 0xddccaa, 2000);
+                ring.rotation.x = Math.PI / 6; ring.rotation.y = Math.PI / 8;
+                planetSystem.add(ring);
+            }
+            if (data.hasMoon) {
+                const moonGroup = new THREE.Group();
+                planetSystem.add(moonGroup);
+                const moonMesh = createCelestialBody(1.2, 0xeeeeee, 80, 'crystal');
+                moonMesh.position.x = data.radius + 5; 
+                moonGroup.add(moonMesh);
+                celestialBodies['Moon'] = { mesh: moonMesh, group: moonGroup, speed: 2.0 };
+            }
+            celestialBodies[data.name] = { orbitGroup: orbitGroup, planetSystem: planetSystem, speed: data.speed };
+        });
+
+        // 3. 银河 (新增双层)
+        galaxyCore = createGalaxyCore();
+        galaxyCore.rotation.x = Math.PI / 8; // 倾斜
+        galaxyCore.rotation.z = Math.PI / 12;
+        scene.add(galaxyCore);
+
+        galaxyMist = createGalaxyMist();
+        galaxyMist.rotation.x = Math.PI / 8;
+        galaxyMist.rotation.z = Math.PI / 12;
+        scene.add(galaxyMist);
+
+        // 4. 远处锐利星空
+        const stars = createRing(1200, 2000, 0xffffff, 2000); 
+        const starPos = stars.geometry.attributes.position.array;
+        for(let i=0; i<starPos.length; i+=3) {
+            const r = 1200 + Math.random() * 1000;
+            const theta = Math.random() * Math.PI * 2;
+            const phi = Math.acos(2 * Math.random() - 1);
+            starPos[i] = r * Math.sin(phi) * Math.cos(theta);
+            starPos[i+1] = r * Math.sin(phi) * Math.sin(theta);
+            starPos[i+2] = r * Math.cos(phi);
+        }
+        stars.material.size = 1.5;
+        stars.material.opacity = 0.5;
+        scene.add(stars);
+
+        // ==========================================
+        // 5. 动画循环
+        // ==========================================
+        function animate() {
+            requestAnimationFrame(animate);
+            const time = Date.now() * 0.0005;
+
+            sun.rotation.y = time * 0.05;
+
+            // 银河流动：内层稍快，外层稍慢，形成错落感
+            if (galaxyCore) galaxyCore.rotation.y = time * 0.015;
+            if (galaxyMist) galaxyMist.rotation.y = time * 0.010;
+            stars.rotation.y = time * 0.005;
+
+            Object.keys(celestialBodies).forEach(key => {
+                const body = celestialBodies[key];
+                if (key === 'Moon') {
+                    body.group.rotation.y = time * body.speed;
+                } else {
+                    body.orbitGroup.rotation.y = time * body.speed * 0.5;
+                    body.planetSystem.rotation.y = time * 0.5;
+                }
+            });
+
+            if (STATE.isHandDetected) {
+                const targetAngle = -STATE.handRotationOffset * 2.5;
+                STATE.cameraAngle += (targetAngle - STATE.cameraAngle) * 0.08;
+                if (STATE.gesture === 'FIST') STATE.targetZoomLevel = 1.0; 
+                else if (STATE.gesture === 'OPEN') STATE.targetZoomLevel = 0.0; 
+            } else {
+                STATE.cameraAngle += 0.0005; 
+            }
+
+            STATE.zoomLevel += (STATE.targetZoomLevel - STATE.zoomLevel) * 0.05;
+            const currentDist = THREE.MathUtils.lerp(CONFIG.minDist, CONFIG.maxDist, STATE.zoomLevel);
+            const camX = Math.sin(STATE.cameraAngle) * currentDist;
+            const camZ = Math.cos(STATE.cameraAngle) * currentDist;
+            const camY = currentDist * 0.3; 
+            camera.position.set(camX, camY, camZ);
+            camera.lookAt(0, 0, 0);
+
+            renderer.render(scene, camera);
+        }
+
+        animate();
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // ==========================================
+        // 6. MediaPipe
+        // ==========================================
+        function getHandRotation(landmarks) {
+            const wrist = landmarks[0];
+            const middleBase = landmarks[9];
+            const dx = middleBase.x - wrist.x;
+            const dy = middleBase.y - wrist.y;
+            return Math.atan2(dy, dx); 
+        }
+
+        function isFist(landmarks) {
+            const wrist = landmarks[0];
+            function dist(idx) { return Math.sqrt(Math.pow(landmarks[idx].x - wrist.x, 2) + Math.pow(landmarks[idx].y - wrist.y, 2)); }
+            let folded = 0;
+            if (dist(8) < dist(6)) folded++;
+            if (dist(12) < dist(10)) folded++;
+            if (dist(16) < dist(14)) folded++;
+            if (dist(20) < dist(18)) folded++;
+            return folded >= 3;
+        }
+
+        function isPalmOpen(landmarks) {
+             const wrist = landmarks[0];
+            function dist(idx) { return Math.sqrt(Math.pow(landmarks[idx].x - wrist.x, 2) + Math.pow(landmarks[idx].y - wrist.y, 2)); }
+            let open = 0;
+            if (dist(8) > dist(6)) open++;
+            if (dist(12) > dist(10)) open++;
+            if (dist(16) > dist(14)) open++;
+            if (dist(20) > dist(18)) open++;
+            return open === 4;
+        }
+
+        function onResults(results) {
+            loadingEl.style.display = 'none';
+            if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
+                const landmarks = results.multiHandLandmarks[0];
+                STATE.isHandDetected = true;
+                STATE.handRotationOffset = getHandRotation(landmarks) - Math.PI / 2;
+                if (isFist(landmarks)) {
+                    STATE.gesture = 'FIST'; statusEl.innerText = "全景模式 (正在拉远)"; statusEl.style.color = "#ffaa00";
+                } else if (isPalmOpen(landmarks)) {
+                    STATE.gesture = 'OPEN'; statusEl.innerText = "观测太阳 (正在靠近)"; statusEl.style.color = "#ff4400";
+                } else {
+                    STATE.gesture = 'NONE';
+                    if (STATE.targetZoomLevel > 0.5) { statusEl.innerText = "太阳系巡航"; statusEl.style.color = "#ffaa00"; } 
+                    else { statusEl.innerText = "恒星近轨巡航"; statusEl.style.color = "#ff8800"; }
+                }
+            } else {
+                STATE.isHandDetected = false; statusEl.innerText = "等待手势..."; statusEl.style.color = "#aaa"; STATE.gesture = 'NONE';
+            }
+        }
+
+        const hands = new window.Hands({locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/hands/${file}`});
+        hands.setOptions({ maxNumHands: 1, modelComplexity: 1, minDetectionConfidence: 0.5, minTrackingConfidence: 0.5 });
+        hands.onResults(onResults);
+
+        async function startCamera() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ video: { width: 640, height: 480, facingMode: "user" } });
+                videoElement.srcObject = stream;
+                async function processVideo() {
+                    if (videoElement.readyState >= 2) await hands.send({image: videoElement});
+                    requestAnimationFrame(processVideo);
+                }
+                videoElement.onloadeddata = () => processVideo();
+            } catch (err) { console.error(err); loadingEl.innerHTML = "摄像头启动失败"; }
+        }
+        startCamera();
+    </script>
+</body>
+</html>
